@@ -87,7 +87,7 @@ Se conserva **Registrar persona** en el panel del administrador. La nueva cuenta
 ### Pago de mensualidad por el representante
 
 1. El representante entra en **Mensualidades → Reportar pago**.
-2. Selecciona el estudiante y completa nombre, documento y teléfono de quien pagó, valor, fecha, período, método y referencia.
+2. Selecciona el estudiante y completa nombre, documento y teléfono de quien pagó, valor, fecha, período, método y referencia. El valor acepta formatos como `200000`, `200.000`, `200,000` o `$200.000`.
 3. Adjunta una foto JPG, PNG o WebP del comprobante. La plataforma la reduce y comprime antes de guardarla en Firestore.
 4. La solicitud queda **Pendiente** y aparece en el panel de los administradores.
 5. El administrador abre la foto y pulsa **Aprobar** o **Rechazar**. Si la rechaza, debe escribir un motivo visible para el representante.

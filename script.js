@@ -243,6 +243,14 @@ function formatMoney(value = 0) {
   }).format(Number(value) || 0);
 }
 
+function parseMoney(value) {
+  if (typeof value === "number") return Number.isFinite(value) ? Math.round(value) : NaN;
+  const digits = String(value ?? "").replace(/[^0-9]/g, "");
+  if (!digits) return NaN;
+  const amount = Number(digits);
+  return Number.isSafeInteger(amount) ? amount : NaN;
+}
+
 function paymentMethodLabel(method) {
   return {
     transfer: "Transferencia",
@@ -1132,7 +1140,7 @@ function openModal(kind, id = "") {
     const monthLater = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
     els.modalFields.innerHTML = `
       ${selectField("studentId", "Estudiante", options(state.data.students, record?.studentId, (item) => `${item.fullName} · ${getById(state.data.users, item.guardianUid)?.fullName || "Representante"}`), record?.studentId, true)}
-      ${field("amount", "Valor pagado", record?.amount || "", "number", "required min=\"0\" step=\"100\"")}
+      ${field("amount", "Valor pagado", record?.amount || "", "text", "required inputmode=\"numeric\" placeholder=\"Ej. 200000 o 200.000\" autocomplete=\"off\"")}
       ${field("paidAtDate", "Fecha del pago", record?.paidAtDate || defaultDate, "date", "required")}
       ${field("validUntilDate", "Válido hasta", record?.validUntilDate || monthLater, "date", "required")}
       ${selectField("method", "Método", `<option value="transfer" ${record?.method === "transfer" ? "selected" : ""}>Transferencia</option><option value="cash" ${record?.method === "cash" ? "selected" : ""}>Efectivo</option><option value="card" ${record?.method === "card" ? "selected" : ""}>Tarjeta</option><option value="other" ${record?.method === "other" ? "selected" : ""}>Otro</option>`, record?.method || "transfer")}
@@ -1153,7 +1161,7 @@ function openModal(kind, id = "") {
       ${field("payerName", "Nombre de quien realizó el pago", state.profile.fullName, "text", "required maxlength=\"120\"")}
       ${field("payerDocument", "Documento de identidad", "", "text", "required maxlength=\"30\"")}
       ${field("payerPhone", "Teléfono de contacto", state.profile.phone || "", "tel", "required maxlength=\"32\"")}
-      ${field("amount", "Valor pagado", "", "number", "required min=\"1\" step=\"100\"")}
+      ${field("amount", "Valor pagado", "", "text", "required inputmode=\"numeric\" placeholder=\"Ej. 200000 o 200.000\" autocomplete=\"off\"")}
       ${field("paidAtDate", "Fecha del pago", defaultDate, "date", "required")}
       ${field("period", "Mensualidad correspondiente", defaultPeriod, "month", "required")}
       ${selectField("method", "Método", '<option value="transfer">Transferencia</option><option value="cash">Efectivo</option><option value="card">Tarjeta</option><option value="other">Otro</option>', "transfer")}
@@ -1254,8 +1262,8 @@ async function submitPaymentRequest(data) {
   const student = getById(state.data.students, data.studentId);
   if (!student || student.guardianUid !== state.user.uid) throw new Error("Selecciona un estudiante vinculado a tu cuenta.");
   if (!data.payerName || !data.payerDocument || !data.payerPhone) throw new Error("Completa los datos de quien realizó el pago.");
-  const amount = Number(data.amount);
-  if (!Number.isFinite(amount) || amount <= 0) throw new Error("Escribe un valor pagado válido.");
+  const amount = parseMoney(data.amount);
+  if (!Number.isFinite(amount) || amount <= 0) throw new Error("Escribe el valor pagado en pesos, por ejemplo 200000 o 200.000.");
   const today = new Date().toISOString().slice(0, 10);
   if (!data.paidAtDate || data.paidAtDate > today) throw new Error("La fecha del pago no puede estar en el futuro.");
   if (!/^\d{4}-\d{2}$/.test(data.period || "")) throw new Error("Selecciona la mensualidad correspondiente.");
@@ -1489,12 +1497,14 @@ async function saveModal(event) {
     if (kind === "payment") {
       const student = getById(state.data.students, data.studentId);
       if (!student) throw new Error("Selecciona un estudiante válido.");
+      const amount = parseMoney(data.amount);
+      if (!Number.isFinite(amount) || amount <= 0) throw new Error("Escribe el valor pagado en pesos, por ejemplo 200000 o 200.000.");
       const reference = id ? doc(db, "payments", id) : doc(collection(db, "payments"));
       await setDoc(reference, {
         studentId: student.id,
         studentName: student.fullName,
         guardianUid: student.guardianUid,
-        amount: Number(data.amount),
+        amount,
         paidAtDate: data.paidAtDate,
         paidAtMs: new Date(`${data.paidAtDate}T12:00:00`).getTime(),
         validUntilDate: data.validUntilDate,
