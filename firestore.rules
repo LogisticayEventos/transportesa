@@ -1,0 +1,187 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function hasProfile() {
+      return signedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function profile() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isActiveRole(role) {
+      return hasProfile() && profile().status == 'active' && profile().role == role;
+    }
+
+    function isAdmin() {
+      return adminIdentity() && isActiveRole('admin')
+        && profile().email == 'franboy1221@gmail.com';
+    }
+
+    function adminIdentity() {
+      return signedIn()
+        && request.auth.token.email == 'franboy1221@gmail.com'
+        && request.auth.token.email_verified == true;
+    }
+
+    function isDriver() {
+      return signedIn() && request.auth.token.email != 'franboy1221@gmail.com'
+        && isActiveRole('driver');
+    }
+
+    function isParent() {
+      return signedIn() && request.auth.token.email != 'franboy1221@gmail.com'
+        && isActiveRole('parent');
+    }
+
+    function assignedRoute(routeId) {
+      return exists(/databases/$(database)/documents/routes/$(routeId))
+        && get(/databases/$(database)/documents/routes/$(routeId)).data.driverUid == request.auth.uid;
+    }
+
+    function validProfileFields(data) {
+      return data.keys().hasAll(['fullName', 'email', 'phone', 'role', 'status', 'createdAt'])
+        && data.keys().hasOnly([
+          'fullName', 'email', 'phone', 'role', 'status', 'createdAt',
+          'createdBy', 'updatedAt', 'approvedAt', 'approvedBy'
+        ])
+        && data.fullName is string && data.fullName.size() >= 2 && data.fullName.size() <= 120
+        && data.phone is string && data.phone.size() <= 32
+        && data.email is string && data.email.size() > 0
+        && data.createdAt is timestamp;
+    }
+
+    function regularProfile(data) {
+      return data.email != 'franboy1221@gmail.com'
+        && data.role in ['driver', 'parent']
+        && data.status in ['pending', 'active', 'inactive'];
+    }
+
+    match /users/{userId} {
+      // Los pendientes solo pueden leer su propio perfil, sin datos operativos.
+      allow read: if isAdmin() || (signedIn() && request.auth.uid == userId);
+
+      allow create: if validProfileFields(request.resource.data)
+        && request.resource.data.createdAt == request.time
+        && (
+          // El administrador solo se crea para el titular del correo verificado.
+          (adminIdentity() && request.auth.uid == userId
+            && request.resource.data.email == 'franboy1221@gmail.com'
+            && request.resource.data.role == 'admin'
+            && request.resource.data.status == 'active'
+            && request.resource.data.keys().hasOnly(['fullName', 'email', 'phone', 'role', 'status', 'createdAt']))
+          // El registro público nunca puede aprobarse ni otorgar permisos admin.
+          || (signedIn() && request.auth.uid == userId
+            && request.auth.token.email != 'franboy1221@gmail.com'
+            && request.resource.data.email == request.auth.token.email
+            && regularProfile(request.resource.data)
+            && request.resource.data.status == 'pending'
+            && request.resource.data.keys().hasOnly(['fullName', 'email', 'phone', 'role', 'status', 'createdAt']))
+          // Registrar desde el panel conserva la aprobación explícita del admin.
+          || (isAdmin() && regularProfile(request.resource.data)
+            && request.resource.data.createdBy == request.auth.uid)
+        );
+
+      allow update: if isAdmin() && validProfileFields(request.resource.data)
+        && request.resource.data.email == resource.data.email
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'fullName', 'phone', 'role', 'status', 'updatedAt', 'approvedAt', 'approvedBy'
+        ])
+        && (regularProfile(request.resource.data)
+          || (request.auth.uid == userId
+            && resource.data.email == 'franboy1221@gmail.com'
+            && request.resource.data.role == 'admin'
+            && request.resource.data.status == 'active'));
+
+      allow delete: if isAdmin() && resource.data.email != 'franboy1221@gmail.com';
+    }
+
+    match /routes/{routeId} {
+      allow read: if isAdmin()
+        || (isDriver() && resource.data.driverUid == request.auth.uid)
+        || (isParent() && request.auth.uid in resource.data.guardianUids);
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin()
+        || (isDriver()
+          && resource.data.driverUid == request.auth.uid
+          && request.resource.data.driverUid == resource.data.driverUid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['activeRunId', 'updatedAt']));
+    }
+
+    match /vehicles/{vehicleId} {
+      allow read: if isAdmin() || (isDriver() && resource.data.driverUid == request.auth.uid);
+      allow write: if isAdmin();
+    }
+
+    match /students/{studentId} {
+      allow read: if isAdmin()
+        || (isParent() && resource.data.guardianUid == request.auth.uid)
+        || (isDriver() && assignedRoute(resource.data.routeId));
+      allow write: if isAdmin();
+    }
+
+    match /payments/{paymentId} {
+      allow read: if isAdmin() || (isParent() && resource.data.guardianUid == request.auth.uid);
+      allow write: if isAdmin();
+    }
+
+    match /routeRuns/{runId} {
+      allow read: if isAdmin()
+        || (isDriver() && resource.data.driverUid == request.auth.uid)
+        || (isParent() && request.auth.uid in resource.data.guardianUids);
+
+      allow create: if isDriver()
+        && request.resource.data.driverUid == request.auth.uid
+        && request.resource.data.status == 'active'
+        && assignedRoute(request.resource.data.routeId);
+
+      allow update: if isDriver()
+        && resource.data.driverUid == request.auth.uid
+        && request.resource.data.driverUid == resource.data.driverUid
+        && request.resource.data.routeId == resource.data.routeId
+        && request.resource.data.guardianUids == resource.data.guardianUids
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status', 'endedAt', 'endedAtMs', 'durationMs',
+          'lastLocation', 'distanceM', 'updatedAt'
+        ]);
+
+      allow delete: if isAdmin();
+      allow update: if isAdmin();
+    }
+
+    match /studentEvents/{eventId} {
+      allow read: if isAdmin()
+        || (isDriver() && resource.data.recordedByUid == request.auth.uid)
+        || (isParent() && resource.data.guardianUid == request.auth.uid);
+
+      allow create: if isDriver()
+        && request.resource.data.recordedByUid == request.auth.uid
+        && assignedRoute(request.resource.data.routeId)
+        && exists(/databases/$(database)/documents/students/$(request.resource.data.studentId))
+        && get(/databases/$(database)/documents/students/$(request.resource.data.studentId)).data.routeId == request.resource.data.routeId
+        && get(/databases/$(database)/documents/students/$(request.resource.data.studentId)).data.guardianUid == request.resource.data.guardianUid;
+
+      allow update, delete: if isAdmin();
+    }
+
+    match /privateTrips/{tripId} {
+      allow read: if isAdmin() || (isDriver() && resource.data.driverUid == request.auth.uid);
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin()
+        || (isDriver()
+          && resource.data.driverUid == request.auth.uid
+          && request.resource.data.driverUid == resource.data.driverUid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt']));
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
