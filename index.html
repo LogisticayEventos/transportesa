@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#071b2d" />
+    <meta
+      name="description"
+      content="Administración de transporte escolar y viajes privados con seguimiento GPS en tiempo real."
+    />
+    <title>RutaNova · Transporte inteligente</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="stylesheet" href="style.css" />
+    <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js" defer></script>
+  </head>
+  <body>
+    <div id="bootScreen" class="boot-screen" aria-live="polite">
+      <div class="boot-logo">RN</div>
+      <div class="boot-copy">
+        <strong>RutaNova</strong>
+        <span>Preparando la plataforma…</span>
+      </div>
+    </div>
+
+    <main id="configScreen" class="center-screen hidden">
+      <section class="message-card">
+        <div class="message-icon"><i data-lucide="settings"></i></div>
+        <p class="eyebrow">Configuración inicial</p>
+        <h1>Conecta Firebase para comenzar</h1>
+        <p>
+          Abre <code>firebase-config.js</code>, pega los datos de tu proyecto y
+          escribe el correo del administrador. La guía incluida explica cada paso.
+        </p>
+      </section>
+    </main>
+
+    <main id="loginScreen" class="login-screen hidden">
+      <section class="login-panel">
+        <div class="brand brand-dark">
+          <span class="brand-icon"><i data-lucide="bus-front"></i></span>
+          <span><strong>RutaNova</strong><small>Transporte inteligente</small></span>
+        </div>
+        <div class="login-copy">
+          <p class="eyebrow"><i data-lucide="shield-check"></i> Acceso protegido</p>
+          <h1>Tu operación de transporte, en un solo lugar.</h1>
+          <p>
+            Consulta rutas en vivo, controla recogidas y entregas, administra
+            mensualidades y mantén informadas a las familias.
+          </p>
+        </div>
+        <form id="loginForm" class="login-form">
+          <label>
+            <span>Correo electrónico</span>
+            <input id="loginEmail" name="email" type="email" autocomplete="email" required />
+          </label>
+          <label>
+            <span>Contraseña</span>
+            <div class="password-field">
+              <input id="loginPassword" name="password" type="password" autocomplete="current-password" required />
+              <button type="button" class="icon-button" id="togglePassword" aria-label="Mostrar contraseña">
+                <i data-lucide="eye"></i>
+              </button>
+            </div>
+          </label>
+          <p id="loginError" class="form-error hidden"></p>
+          <button class="button button-primary button-lg" type="submit">
+            <i data-lucide="log-in"></i> Iniciar sesión
+          </button>
+          <button id="showRegister" class="button button-outline button-lg" type="button">
+            <i data-lucide="user-plus"></i> Crear mi cuenta
+          </button>
+        </form>
+        <form id="registerForm" class="login-form hidden">
+          <label><span>Nombre completo</span><input name="fullName" type="text" autocomplete="name" minlength="2" maxlength="120" required /></label>
+          <label><span>Teléfono</span><input name="phone" type="tel" autocomplete="tel" maxlength="32" required /></label>
+          <label><span>Perfil</span><select name="role" required><option value="">Selecciona tu perfil</option><option value="driver">Conductor</option><option value="parent">Representante</option></select></label>
+          <label><span>Correo electrónico</span><input name="email" type="email" autocomplete="email" required /></label>
+          <label><span>Contraseña</span><input name="password" type="password" autocomplete="new-password" minlength="6" required /></label>
+          <label><span>Confirmar contraseña</span><input name="confirmPassword" type="password" autocomplete="new-password" minlength="6" required /></label>
+          <p id="registerError" class="form-error hidden" role="alert"></p>
+          <button class="button button-primary button-lg" type="submit"><i data-lucide="user-plus"></i> Registrarme</button>
+          <button id="showLogin" class="button button-outline button-lg" type="button"><i data-lucide="log-in"></i> Ya tengo cuenta</button>
+        </form>
+        <p class="login-note">
+          Conductores y representantes pueden crear su cuenta. El acceso se habilita cuando el administrador la aprueba.
+        </p>
+      </section>
+      <aside class="login-visual" aria-hidden="true">
+        <div class="map-grid"></div>
+        <div class="route-ring ring-one"></div>
+        <div class="route-ring ring-two"></div>
+        <article class="preview-card">
+          <header><span class="preview-pin"><i data-lucide="map-pinned"></i></span><span class="live-pill">En ruta</span></header>
+          <h2>Colegio → Hogar</h2>
+          <p>12 pasajeros · llegada estimada 4:18 p. m.</p>
+          <div class="preview-line"><span></span></div>
+          <footer><span><i></i>Colegio</span><span><i></i>Próxima parada</span><span><i></i>Destino</span></footer>
+        </article>
+      </aside>
+    </main>
+
+    <main id="accountScreen" class="center-screen hidden">
+      <section class="message-card">
+        <div class="message-icon"><i data-lucide="shield-check"></i></div>
+        <p class="eyebrow">Estado de tu cuenta</p>
+        <h1 id="accountStatusTitle">Cuenta pendiente de aprobación</h1>
+        <p id="accountStatusMessage" aria-live="polite"></p>
+        <p id="accountStatusEmail" class="login-note"></p>
+        <div id="accountVerificationActions" class="panel-actions hidden">
+          <button id="sendVerification" class="button button-primary" type="button">Enviar verificación</button>
+          <button id="refreshVerification" class="button button-outline" type="button">Ya verifiqué mi correo</button>
+        </div>
+        <div class="panel-actions">
+          <button id="accountLogout" class="button button-outline" type="button"><i data-lucide="log-out"></i> Cerrar sesión</button>
+        </div>
+      </section>
+    </main>
+
+    <div id="appShell" class="app-shell hidden">
+      <aside id="sidebar" class="sidebar">
+        <div class="sidebar-header">
+          <div class="brand">
+            <span class="brand-icon"><i data-lucide="bus-front"></i></span>
+            <span><strong id="sidebarBrand">RutaNova</strong><small>Transporte inteligente</small></span>
+          </div>
+          <button id="closeMenu" class="icon-button mobile-only" aria-label="Cerrar menú"><i data-lucide="x"></i></button>
+        </div>
+        <div class="sidebar-label">Navegación</div>
+        <nav id="sidebarNav" class="sidebar-nav"></nav>
+        <div class="sidebar-spacer"></div>
+        <div class="secure-box"><i data-lucide="shield-check"></i><span><strong>Operación protegida</strong><small>Permisos separados por perfil.</small></span></div>
+      </aside>
+      <button id="sidebarBackdrop" class="sidebar-backdrop" aria-label="Cerrar menú"></button>
+
+      <div class="main-shell">
+        <header class="topbar">
+          <div class="topbar-left">
+            <button id="openMenu" class="icon-button mobile-only" aria-label="Abrir menú"><i data-lucide="menu"></i></button>
+            <span><strong id="sectionTitle">Centro de control</strong><small id="todayLabel"></small></span>
+          </div>
+          <div class="topbar-right">
+            <span id="gpsBadge" class="live-pill hidden">GPS transmitiendo</span>
+            <div class="account-pill"><span id="accountAvatar" class="avatar">RN</span><span><strong id="accountName">Usuario</strong><small id="accountRole">Perfil</small></span></div>
+            <button id="logoutButton" class="icon-button" aria-label="Cerrar sesión"><i data-lucide="log-out"></i></button>
+          </div>
+        </header>
+        <section id="mainContent" class="content" aria-live="polite"></section>
+      </div>
+    </div>
+
+    <dialog id="entityDialog" class="modal">
+      <form id="entityForm" method="dialog">
+        <header class="modal-header">
+          <span><h2 id="modalTitle">Nuevo registro</h2><p id="modalDescription">Completa la información.</p></span>
+          <button type="button" id="closeDialog" class="icon-button" aria-label="Cerrar"><i data-lucide="x"></i></button>
+        </header>
+        <div id="modalFields" class="form-grid"></div>
+        <p id="modalError" class="form-error hidden"></p>
+        <footer class="modal-footer">
+          <button type="button" id="cancelDialog" class="button button-outline">Cancelar</button>
+          <button type="submit" id="saveDialog" class="button button-primary">Guardar información</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <div id="toastRegion" class="toast-region" aria-live="polite"></div>
+
+    <script type="module" src="script.js"></script>
+  </body>
+</html>

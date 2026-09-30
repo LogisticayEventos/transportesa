@@ -1,0 +1,17 @@
+{
+  "name": "RutaNova · Transporte inteligente",
+  "short_name": "RutaNova",
+  "description": "Administración de transporte escolar y viajes privados con GPS en tiempo real.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f3f7f8",
+  "theme_color": "#071b2d",
+  "icons": [
+    {
+      "src": "favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
