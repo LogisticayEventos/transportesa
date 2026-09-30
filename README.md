@@ -4,12 +4,14 @@ Sitio web estático preparado para publicarse en **GitHub Pages**. Usa Firebase 
 
 ## Funciones incluidas
 
-- Panel de administrador: rutas, usuarios, estudiantes, flota, mensualidades, viajes privados y estadísticas.
+- Panel de administrador: rutas, usuarios, estudiantes, flota, comprobantes de mensualidad, viajes privados y estadísticas.
 - Panel de conductor: rutas del día, vehículo, lista de pasajeros, inicio/final del recorrido, recogidas, entregas, duración, kilómetros y GPS.
-- Panel de representante: ubicación del vehículo, hora de recogida, hora de llegada, historial, pagos y días restantes de mensualidad.
+- Panel de representante: ubicación del vehículo, historial, pagos, envío de comprobantes con foto y días restantes de mensualidad.
 - Inicio de sesión con tres perfiles: administrador, conductor y representante.
 - Registro público de conductores y representantes, pendiente de aprobación.
-- Único administrador general: `franboy1221@gmail.com`, con correo verificado.
+- Administrador general protegido: `franboy1221@gmail.com`, con facultad exclusiva para otorgar o retirar el rango **Administrador**.
+- Administradores delegados para apoyar la operación, sin permiso para crear otros administradores ni modificar al administrador general.
+- Control documental de vehículos con vencimiento de revisión técnica, seguro y FUEC.
 - Datos en tiempo real y reglas de acceso independientes por perfil.
 - Diseño responsive para computador, tableta y teléfono.
 
@@ -33,14 +35,13 @@ export const firebaseConfig = {
   apiKey: "AIzaSyCb2s54q_nMBxRHmGEqW7OJ6MFdnick1Rw",
   authDomain: "trasnportadora.firebaseapp.com",
   projectId: "trasnportadora",
-  storageBucket: "trasnportadora.firebasestorage.app",
   messagingSenderId: "732726014384",
 };
 ```
 
 La configuración web de Firebase es pública. Las contraseñas solo se envían a Firebase Authentication al registrarse o iniciar sesión; no se guardan en archivos, perfiles de Firestore ni almacenamiento local. No hay contraseña de administrador predefinida. Firebase conserva la sesión mediante sus credenciales de autenticación.
 
-Auth y Firestore funcionan con estos datos. No se incluye un `appId` de ejemplo ni se activa Analytics. Las reglas fijan el mismo correo administrador y no aceptan otros administradores aunque se altere la interfaz o la configuración del navegador.
+Auth y Firestore funcionan con estos datos. No se incluye un `appId` de ejemplo ni se activa Analytics. Las reglas fijan el correo del administrador general y permiten administradores delegados únicamente cuando él los asigna desde la plataforma.
 
 ## 3. Publicar las reglas de seguridad
 
@@ -50,6 +51,8 @@ Auth y Firestore funcionan con estos datos. No se incluye un `appId` de ejemplo 
 
 Las reglas permiten que cada familia aprobada vea únicamente sus niños, pagos y rutas; cada conductor aprobado ve únicamente sus asignaciones; y el administrador controla la operación. Una cuenta pendiente o inactiva solo puede leer su propio perfil y no puede aprobarse, cambiar su rol ni acceder a datos operativos.
 
+No es necesario habilitar Firebase Storage. Las fotos se comprimen en el navegador y se guardan en un documento protegido de Firestore separado de la solicitud. El comprobante optimizado ocupa como máximo unos 450 KB, por debajo del límite de 1 MiB por documento, y solo se descarga cuando alguien pulsa **Ver foto**. Esto reduce el consumo de la cuota gratuita y mantiene fluida la lista de pagos.
+
 ## 4. Habilitar el administrador general
 
 1. En Firebase abre **Authentication → Users**.
@@ -57,7 +60,16 @@ Las reglas permiten que cada familia aprobada vea únicamente sus niños, pagos 
 3. Usa exactamente `franboy1221@gmail.com` y establece una contraseña directamente en Firebase. Si ya existe, conserva la cuenta y su contraseña.
 4. Abre el sitio publicado e inicia sesión. Si el correo no está verificado, pulsa **Enviar verificación**, abre el enlace recibido y pulsa **Ya verifiqué mi correo**. Si ya está verificado, ingresarás directamente.
 
-En el primer ingreso con el correo verificado, la plataforma creará automáticamente el perfil del administrador general. No existe registro público para ese correo ni un selector para crear administradores adicionales.
+En el primer ingreso con el correo verificado, la plataforma creará automáticamente el perfil del administrador general. No existe registro público para ese correo.
+
+### Asignar administradores adicionales
+
+1. La persona crea su cuenta como **Conductor** o **Representante**, o el administrador la registra desde **Personas**.
+2. Aprueba la cuenta si está pendiente.
+3. Inicia sesión con `franboy1221@gmail.com`, entra en **Personas** y pulsa **Editar** sobre esa persona.
+4. En **Perfil**, selecciona **Administrador** y deja el estado **Activo**.
+
+El nuevo administrador puede gestionar rutas, personas, estudiantes, flota, pagos y viajes. No puede otorgar o retirar rangos administrativos ni modificar al administrador general. Esa protección también está en `firestore.rules`, no solo en la interfaz.
 
 ### Registro público y aprobación
 
@@ -71,6 +83,15 @@ En el primer ingreso con el correo verificado, la plataforma creará automática
 Para retirar el acceso, el administrador elige **Inactivo** en **Editar**. Una sesión abierta pasa a la pantalla de cuenta inactiva y deja de recibir datos operativos. Los usuarios pendientes no aparecen como conductores o representantes disponibles para nuevas asignaciones.
 
 Se conserva **Registrar persona** en el panel del administrador. La nueva cuenta queda pendiente por defecto; seleccionar **Activo (aprobado)** constituye la aprobación explícita del administrador. Se guarda quién aprobó y cuándo, sin guardar contraseñas.
+
+### Pago de mensualidad por el representante
+
+1. El representante entra en **Mensualidades → Reportar pago**.
+2. Selecciona el estudiante y completa nombre, documento y teléfono de quien pagó, valor, fecha, período, método y referencia.
+3. Adjunta una foto JPG, PNG o WebP del comprobante. La plataforma la reduce y comprime antes de guardarla en Firestore.
+4. La solicitud queda **Pendiente** y aparece en el panel de los administradores.
+5. El administrador abre la foto y pulsa **Aprobar** o **Rechazar**. Si la rechaza, debe escribir un motivo visible para el representante.
+6. Al aprobar, se crea automáticamente el pago, se marca **Pagado** y la mensualidad queda vigente durante 30 días desde la fecha informada.
 
 ## 5. Publicar en GitHub Pages
 
@@ -100,7 +121,7 @@ GitHub Pages puede tardar uno o dos minutos en publicar la primera versión.
 3. Registra los vehículos en **Flota**.
 4. Crea las rutas y asigna conductor y vehículo.
 5. Inscribe los estudiantes, elige su representante y su ruta.
-6. Registra las mensualidades.
+6. Revisa los comprobantes recibidos o registra manualmente las mensualidades.
 7. Si creaste una cuenta desde el panel, entrega sus credenciales a esa persona. Quienes se registran públicamente usan su propia contraseña.
 
 ## GPS del teléfono del conductor

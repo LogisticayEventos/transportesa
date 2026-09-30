@@ -9,7 +9,6 @@ export const firebaseConfig = {
   apiKey: "AIzaSyCb2s54q_nMBxRHmGEqW7OJ6MFdnick1Rw",
   authDomain: "trasnportadora.firebaseapp.com",
   projectId: "trasnportadora",
-  storageBucket: "trasnportadora.firebasestorage.app",
   messagingSenderId: "732726014384",
   // Auth y Firestore no requieren appId. No se incluye un identificador inventado.
 };

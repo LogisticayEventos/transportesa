@@ -19,7 +19,12 @@ service cloud.firestore {
     }
 
     function isAdmin() {
-      return adminIdentity() && isActiveRole('admin')
+      return isActiveRole('admin')
+        && request.auth.token.email == profile().email;
+    }
+
+    function isGeneralAdmin() {
+      return isAdmin() && adminIdentity()
         && profile().email == 'franboy1221@gmail.com';
     }
 
@@ -62,6 +67,12 @@ service cloud.firestore {
         && data.status in ['pending', 'active', 'inactive'];
     }
 
+    function delegatedAdminProfile(data) {
+      return data.email != 'franboy1221@gmail.com'
+        && data.role == 'admin'
+        && data.status in ['active', 'inactive'];
+    }
+
     match /users/{userId} {
       // Los pendientes solo pueden leer su propio perfil, sin datos operativos.
       allow read: if isAdmin() || (signedIn() && request.auth.uid == userId);
@@ -93,13 +104,22 @@ service cloud.firestore {
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           'fullName', 'phone', 'role', 'status', 'updatedAt', 'approvedAt', 'approvedBy'
         ])
-        && (regularProfile(request.resource.data)
-          || (request.auth.uid == userId
-            && resource.data.email == 'franboy1221@gmail.com'
-            && request.resource.data.role == 'admin'
-            && request.resource.data.status == 'active'));
+        && (
+          (isGeneralAdmin() && (
+            (resource.data.email == 'franboy1221@gmail.com'
+              && request.auth.uid == userId
+              && request.resource.data.role == 'admin'
+              && request.resource.data.status == 'active')
+            || (resource.data.email != 'franboy1221@gmail.com'
+              && (regularProfile(request.resource.data) || delegatedAdminProfile(request.resource.data)))
+          ))
+          || (!isGeneralAdmin()
+            && resource.data.role != 'admin'
+            && regularProfile(request.resource.data))
+        );
 
-      allow delete: if isAdmin() && resource.data.email != 'franboy1221@gmail.com';
+      allow delete: if (isGeneralAdmin() && resource.data.email != 'franboy1221@gmail.com')
+        || (isAdmin() && !isGeneralAdmin() && resource.data.role != 'admin');
     }
 
     match /routes/{routeId} {
@@ -129,6 +149,99 @@ service cloud.firestore {
     match /payments/{paymentId} {
       allow read: if isAdmin() || (isParent() && resource.data.guardianUid == request.auth.uid);
       allow write: if isAdmin();
+    }
+
+    function validPaymentRequest(data) {
+      return data.keys().hasAll([
+          'guardianUid', 'guardianName', 'guardianEmail', 'studentId', 'studentName',
+          'payerName', 'payerDocument', 'payerPhone', 'amount', 'paidAtDate', 'paidAtMs',
+          'period', 'method', 'reference', 'status', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'guardianUid', 'guardianName', 'guardianEmail', 'studentId', 'studentName',
+          'payerName', 'payerDocument', 'payerPhone', 'amount', 'paidAtDate', 'paidAtMs',
+          'period', 'method', 'reference', 'status', 'createdAt', 'updatedAt',
+          'reviewNote', 'reviewedAt', 'reviewedBy'
+        ])
+        && data.guardianUid is string
+        && data.guardianName is string && data.guardianName.size() <= 120
+        && data.guardianEmail is string && data.guardianEmail.size() <= 254
+        && data.studentId is string && data.studentName is string && data.studentName.size() <= 120
+        && data.payerName is string && data.payerName.size() >= 2 && data.payerName.size() <= 120
+        && data.payerDocument is string && data.payerDocument.size() >= 3 && data.payerDocument.size() <= 30
+        && data.payerPhone is string && data.payerPhone.size() >= 3 && data.payerPhone.size() <= 32
+        && data.amount is number && data.amount > 0
+        && data.paidAtDate is string && data.paidAtDate.matches('[0-9]{4}-[0-9]{2}-[0-9]{2}')
+        && data.paidAtMs is number
+        && data.period is string && data.period.matches('[0-9]{4}-[0-9]{2}')
+        && data.method in ['transfer', 'cash', 'card', 'other']
+        && data.reference is string && data.reference.size() <= 80
+        && data.status in ['pending', 'approved', 'rejected'];
+    }
+
+    function validPaymentProof(data) {
+      return data.keys().hasAll([
+          'requestId', 'guardianUid', 'proofDataUrl', 'proofName',
+          'proofContentType', 'proofSize', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'requestId', 'guardianUid', 'proofDataUrl', 'proofName',
+          'proofContentType', 'proofSize', 'createdAt'
+        ])
+        && data.requestId is string
+        && data.guardianUid is string
+        && data.proofDataUrl is string && data.proofDataUrl.size() <= 650000
+        && data.proofDataUrl.matches('data:image/jpeg;base64,.*')
+        && data.proofName is string && data.proofName.size() <= 160
+        && data.proofContentType == 'image/jpeg'
+        && data.proofSize is number && data.proofSize > 0 && data.proofSize <= 460800
+        && data.createdAt is timestamp;
+    }
+
+    match /paymentRequests/{requestId} {
+      allow read: if isAdmin() || (isParent() && resource.data.guardianUid == request.auth.uid);
+
+      allow create: if isParent()
+        && validPaymentRequest(request.resource.data)
+        && request.resource.data.guardianUid == request.auth.uid
+        && request.resource.data.guardianName == profile().fullName
+        && request.resource.data.guardianEmail == request.auth.token.email
+        && request.resource.data.status == 'pending'
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && exists(/databases/$(database)/documents/students/$(request.resource.data.studentId))
+        && get(/databases/$(database)/documents/students/$(request.resource.data.studentId)).data.guardianUid == request.auth.uid
+        && request.resource.data.studentName == get(/databases/$(database)/documents/students/$(request.resource.data.studentId)).data.fullName
+        && existsAfter(/databases/$(database)/documents/paymentProofs/$(requestId))
+        && getAfter(/databases/$(database)/documents/paymentProofs/$(requestId)).data.guardianUid == request.auth.uid;
+
+      allow update: if isAdmin()
+        && validPaymentRequest(request.resource.data)
+        && resource.data.status == 'pending'
+        && request.resource.data.status in ['approved', 'rejected']
+        && request.resource.data.reviewedBy == request.auth.uid
+        && request.resource.data.reviewedAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status', 'reviewNote', 'reviewedAt', 'reviewedBy', 'updatedAt'
+        ]);
+
+      allow delete: if isAdmin();
+    }
+
+    match /paymentProofs/{requestId} {
+      allow read: if isAdmin() || (isParent() && resource.data.guardianUid == request.auth.uid);
+
+      allow create: if isParent()
+        && validPaymentProof(request.resource.data)
+        && request.resource.data.requestId == requestId
+        && request.resource.data.guardianUid == request.auth.uid
+        && request.resource.data.createdAt == request.time
+        && existsAfter(/databases/$(database)/documents/paymentRequests/$(requestId))
+        && getAfter(/databases/$(database)/documents/paymentRequests/$(requestId)).data.guardianUid == request.auth.uid;
+
+      allow update: if false;
+      allow delete: if isAdmin();
     }
 
     match /routeRuns/{runId} {

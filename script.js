@@ -86,6 +86,7 @@ const emptyData = () => ({
   vehicles: [],
   students: [],
   payments: [],
+  paymentRequests: [],
   runs: [],
   events: [],
   trips: [],
@@ -180,14 +181,23 @@ function initials(name = "RN") {
     .join("") || "RN";
 }
 
-function roleLabel(role) {
-  return { admin: "Administrador general", driver: "Conductor", parent: "Representante" }[role] || "Usuario";
+function isGeneralAdmin() {
+  return state.profile?.role === "admin"
+    && state.user?.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase();
+}
+
+function roleLabel(role, email = "") {
+  if (role === "admin") return email.toLowerCase() === ADMIN_EMAIL.toLowerCase() ? "Administrador general" : "Administrador";
+  return { driver: "Conductor", parent: "Representante" }[role] || "Usuario";
 }
 
 function valueMs(value) {
   if (!value) return 0;
   if (typeof value === "number") return value;
   if (typeof value?.toMillis === "function") return value.toMillis();
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return new Date(`${value}T12:00:00`).getTime();
+  }
   const parsed = new Date(value).getTime();
   return Number.isNaN(parsed) ? 0 : parsed;
 }
@@ -213,6 +223,12 @@ function formatDateTime(value) {
   }).format(ms);
 }
 
+function formatPeriod(value) {
+  if (!/^\d{4}-\d{2}$/.test(value || "")) return value || "Mensualidad";
+  const [year, month] = value.split("-").map(Number);
+  return new Intl.DateTimeFormat("es", { month: "long", year: "numeric" }).format(new Date(year, month - 1, 15));
+}
+
 function formatTime(value) {
   const ms = valueMs(value);
   if (!ms) return "—";
@@ -225,6 +241,15 @@ function formatMoney(value = 0) {
     currency: "COP",
     maximumFractionDigits: 0,
   }).format(Number(value) || 0);
+}
+
+function paymentMethodLabel(method) {
+  return {
+    transfer: "Transferencia",
+    cash: "Efectivo",
+    card: "Tarjeta",
+    other: "Otro",
+  }[method] || "No indicado";
 }
 
 function formatDuration(ms = 0) {
@@ -346,6 +371,7 @@ function subscribeForRole() {
     watch("vehicles", collection(db, "vehicles"));
     watch("students", collection(db, "students"));
     watch("payments", collection(db, "payments"));
+    watch("paymentRequests", collection(db, "paymentRequests"));
     watch("runs", collection(db, "routeRuns"));
     watch("events", collection(db, "studentEvents"));
     watch("trips", collection(db, "privateTrips"));
@@ -358,6 +384,7 @@ function subscribeForRole() {
   } else {
     watch("students", query(collection(db, "students"), where("guardianUid", "==", uid)));
     watch("payments", query(collection(db, "payments"), where("guardianUid", "==", uid)));
+    watch("paymentRequests", query(collection(db, "paymentRequests"), where("guardianUid", "==", uid)));
     watch("routes", query(collection(db, "routes"), where("guardianUids", "array-contains", uid)));
     watch("runs", query(collection(db, "routeRuns"), where("guardianUids", "array-contains", uid)));
     watch("events", query(collection(db, "studentEvents"), where("guardianUid", "==", uid)));
@@ -399,10 +426,12 @@ function applyProfile(user, profile) {
   if (!menus[profile.role] || !["active", "pending", "inactive"].includes(profile.status)) {
     throw new Error("Tu cuenta no tiene un perfil autorizado. Contacta al administrador.");
   }
-  const adminIdentity = user.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase() && user.emailVerified;
-  if ((profile.role === "admin" && (!adminIdentity || profile.email !== ADMIN_EMAIL || profile.status !== "active"))
-    || (profile.role !== "admin" && user.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase())) {
-    throw new Error("El acceso de administrador general está reservado a su cuenta verificada.");
+  const authEmail = user.email?.toLowerCase() || "";
+  const profileEmail = profile.email?.toLowerCase() || "";
+  const generalAdmin = authEmail === ADMIN_EMAIL.toLowerCase();
+  if ((profile.role === "admin" && profileEmail !== authEmail)
+    || (generalAdmin && (profile.role !== "admin" || !user.emailVerified))) {
+    throw new Error("El perfil administrativo no coincide con la cuenta autorizada.");
   }
   const previousRole = state.profile?.role;
   const hadAccess = state.profile?.status === "active" && !els.app.classList.contains("hidden");
@@ -419,7 +448,7 @@ function applyProfile(user, profile) {
   if (!hadAccess || previousRole !== profile.role) state.section = menus[profile.role][0][0];
   els.sidebarBrand.textContent = APP_NAME;
   els.accountName.textContent = profile.fullName || user.email;
-  els.accountRole.textContent = roleLabel(profile.role);
+  els.accountRole.textContent = roleLabel(profile.role, profile.email);
   els.accountAvatar.textContent = initials(profile.fullName || user.email);
   els.today.textContent = new Intl.DateTimeFormat("es", {
     weekday: "long", day: "numeric", month: "long",
@@ -480,7 +509,11 @@ function buildNav() {
   const items = menus[state.profile.role] || [];
   els.sidebarNav.innerHTML = items
     .map(([key, label, icon]) => {
-      const count = key === "passengers" ? state.data.students.length : "";
+      const count = key === "passengers"
+        ? state.data.students.length
+        : key === "payments"
+          ? state.data.paymentRequests.filter((request) => request.status === "pending").length
+          : "";
       return `<button class="nav-button ${key === state.section ? "active" : ""}" data-nav="${key}"><i data-lucide="${icon}"></i><span>${label}</span>${count ? `<span class="nav-count">${count}</span>` : ""}</button>`;
     })
     .join("");
@@ -509,6 +542,8 @@ function statusBadge(status) {
     maintenance: ["Mantenimiento", "warning"],
     assigned: ["Asignado", "info"],
     pending: ["Pendiente", "warning"],
+    approved: ["Aprobado", "success"],
+    rejected: ["Rechazado", "danger"],
     paid: ["Pagado", "success"],
     expired: ["Vencido", "danger"],
     scheduled: ["Programado", "info"],
@@ -580,18 +615,15 @@ function adminOverview() {
     const left = daysUntil(payment.validUntilDate);
     return left !== null && left <= 5;
   });
+  const pendingRequests = state.data.paymentRequests.filter((request) => request.status === "pending");
   const weekKm = weekRuns.reduce((sum, run) => sum + Number(run.distanceM || 0), 0) / 1000;
-  const collected = state.data.payments
-    .filter((payment) => valueMs(payment.paidAt || payment.paidAtMs || payment.paidAtDate) >= todayStart(-6))
-    .reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
-
   return `<div class="page-stack">
     <div class="hero-row"><div class="hero-copy"><h1>Operación bajo control</h1><p>Supervisa rutas, pasajeros, pagos y flota desde una vista unificada con información actualizada en tiempo real.</p></div><div class="hero-actions"><button class="button button-outline" data-open="payment"><i data-lucide="circle-dollar-sign"></i>Registrar pago</button><button class="button button-primary" data-open="route"><i data-lucide="plus"></i>Nueva ruta</button></div></div>
     <div class="metrics-grid">
       ${metric("Rutas activas", String(activeRuns.length), "navigation", "", `${completedToday.length} finalizadas hoy`)}
       ${metric("Estudiantes activos", String(state.data.students.filter((item) => item.status !== "inactive").length), "graduation-cap", "metric-blue", `${state.data.routes.length} rutas registradas`)}
       ${metric("Kilómetros esta semana", weekKm.toFixed(1), "gauge", "metric-violet", `${weekRuns.length} recorridos`)}
-      ${metric("Mensualidades por atender", String(expiring.length), "calendar-clock", "metric-amber", collected ? `${formatMoney(collected)} recaudado` : "Últimos 7 días")}
+      ${metric("Mensualidades por atender", String(expiring.length + pendingRequests.length), "calendar-clock", "metric-amber", `${pendingRequests.length} comprobantes pendientes`)}
     </div>
     <div class="dashboard-grid">
       ${panel("Rutas en operación", "Seguimiento del servicio actual", adminLiveRoutes(activeRuns), `<button class="button button-outline button-sm" data-nav="routes">Ver todas</button>`, true)}
@@ -682,9 +714,15 @@ function adminUsers() {
   const pending = state.data.users.filter((user) => user.status === "pending").length;
   const users = [...state.data.users].sort((a, b) => Number(b.status === "pending") - Number(a.status === "pending") || (order[a.role] ?? 9) - (order[b.role] ?? 9) || String(a.fullName).localeCompare(String(b.fullName)));
   const body = users.length
-    ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Persona</th><th>Perfil</th><th>Teléfono</th><th>Estado</th><th></th></tr></thead><tbody>${users.map((user) => `<tr><td><div class="table-main"><span class="row-icon">${initials(user.fullName)}</span><span><strong>${escapeHtml(user.fullName)}</strong><small>${escapeHtml(user.email)}</small></span></div></td><td>${escapeHtml(roleLabel(user.role))}</td><td>${escapeHtml(user.phone || "—")}</td><td>${statusBadge(user.status || "active")}</td><td><div class="row-actions">${user.status === "pending" && ["driver", "parent"].includes(user.role) ? `<button class="button button-success button-sm" data-approve-user="${user.id}"><i data-lucide="check"></i>Aprobar</button>` : ""}<button class="icon-button" data-edit="user" data-id="${user.id}" aria-label="Editar"><i data-lucide="pencil"></i></button></div></td></tr>`).join("")}</tbody></table></div>`
+    ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Persona</th><th>Perfil</th><th>Teléfono</th><th>Estado</th><th></th></tr></thead><tbody>${users.map((user) => {
+      const canEdit = isGeneralAdmin() || user.role !== "admin";
+      return `<tr><td><div class="table-main"><span class="row-icon">${initials(user.fullName)}</span><span><strong>${escapeHtml(user.fullName)}</strong><small>${escapeHtml(user.email)}</small></span></div></td><td>${escapeHtml(roleLabel(user.role, user.email))}</td><td>${escapeHtml(user.phone || "—")}</td><td>${statusBadge(user.status || "active")}</td><td><div class="row-actions">${user.status === "pending" && ["driver", "parent"].includes(user.role) ? `<button class="button button-success button-sm" data-approve-user="${user.id}"><i data-lucide="check"></i>Aprobar</button>` : ""}${canEdit ? `<button class="icon-button" data-edit="user" data-id="${user.id}" aria-label="Editar"><i data-lucide="pencil"></i></button>` : ""}</div></td></tr>`;
+    }).join("")}</tbody></table></div>`
     : emptyState("users", "No hay personas registradas", "Registra conductores y representantes para asignarles rutas.");
-  return `<div class="page-stack"><div class="hero-row"><div class="hero-copy"><h1>Personas y accesos</h1><p>Administra cuentas, perfiles y permisos de la plataforma. ${pending} pendientes de aprobación.</p></div><div class="hero-actions"><button class="button button-primary" data-open="user"><i data-lucide="user-plus"></i>Registrar persona</button></div></div>${panel("Directorio", `${users.length} perfiles registrados`, body, "", true)}</div>`;
+  const permissionNote = isGeneralAdmin()
+    ? "Solo tú puedes conceder o retirar el rango Administrador desde Editar persona."
+    : "Puedes gestionar conductores y representantes; el administrador general controla los rangos administrativos.";
+  return `<div class="page-stack"><div class="hero-row"><div class="hero-copy"><h1>Personas y accesos</h1><p>Administra cuentas, perfiles y permisos de la plataforma. ${pending} pendientes de aprobación.</p></div><div class="hero-actions"><button class="button button-primary" data-open="user"><i data-lucide="user-plus"></i>Registrar persona</button></div></div><div class="note-box"><i data-lucide="shield-check"></i><span><strong>Permisos administrativos</strong><span>${escapeHtml(permissionNote)}</span></span></div>${panel("Directorio", `${users.length} perfiles registrados`, body, "", true)}</div>`;
 }
 
 function adminStudents() {
@@ -708,13 +746,21 @@ function adminVehicles() {
     ? `<div class="route-cards">${vehicles.map((vehicle) => {
       const driver = getById(state.data.users, vehicle.driverUid);
       const reviewDays = daysUntil(vehicle.technicalReviewDate);
-      return `<article class="route-card"><div class="route-accent" style="background:#2c78c7"></div><div class="route-card-body"><div class="route-card-head"><span><h3>${escapeHtml(vehicle.plate)}</h3><p class="route-subtitle">${escapeHtml(`${vehicle.brand || ""} ${vehicle.model || ""} ${vehicle.year || ""}`.trim())}</p></span>${statusBadge(vehicle.status || "available")}</div><div class="list"><div class="list-item"><span class="list-copy"><strong>Conductor</strong><small>${escapeHtml(driver?.fullName || "Sin asignar")}</small></span><i data-lucide="user-round"></i></div><div class="list-item"><span class="list-copy"><strong>Capacidad</strong><small>${escapeHtml(String(vehicle.capacity || 0))} pasajeros</small></span><i data-lucide="users-round"></i></div><div class="list-item"><span class="list-copy"><strong>Revisión técnica</strong><small>${formatDate(vehicle.technicalReviewDate)}${reviewDays !== null ? ` · ${reviewDays} días` : ""}</small></span><i data-lucide="clipboard-check"></i></div></div><div class="route-card-actions"><button class="button button-outline button-sm" data-edit="vehicle" data-id="${vehicle.id}"><i data-lucide="pencil"></i>Editar</button><button class="icon-button" data-delete="vehicle" data-id="${vehicle.id}" aria-label="Eliminar"><i data-lucide="trash-2"></i></button></div></div></article>`;
+      const insuranceDays = daysUntil(vehicle.insuranceDate);
+      const fuecDays = daysUntil(vehicle.fuecExpirationDate);
+      const documentLine = (date, days) => `${formatDate(date)}${days !== null ? ` · ${days < 0 ? `${Math.abs(days)} días vencido` : `${days} días`}` : ""}`;
+      return `<article class="route-card"><div class="route-accent" style="background:#2c78c7"></div><div class="route-card-body"><div class="route-card-head"><span><h3>${escapeHtml(vehicle.plate)}</h3><p class="route-subtitle">${escapeHtml(`${vehicle.brand || ""} ${vehicle.model || ""} ${vehicle.year || ""}`.trim())}</p></span>${statusBadge(vehicle.status || "available")}</div><div class="list"><div class="list-item"><span class="list-copy"><strong>Conductor</strong><small>${escapeHtml(driver?.fullName || "Sin asignar")}</small></span><i data-lucide="user-round"></i></div><div class="list-item"><span class="list-copy"><strong>Capacidad</strong><small>${escapeHtml(String(vehicle.capacity || 0))} pasajeros</small></span><i data-lucide="users-round"></i></div><div class="list-item"><span class="list-copy"><strong>Revisión técnica</strong><small>${escapeHtml(documentLine(vehicle.technicalReviewDate, reviewDays))}</small></span>${reviewDays !== null && reviewDays < 0 ? statusBadge("expired") : '<i data-lucide="clipboard-check"></i>'}</div><div class="list-item"><span class="list-copy"><strong>Seguro</strong><small>${escapeHtml(documentLine(vehicle.insuranceDate, insuranceDays))}</small></span>${insuranceDays !== null && insuranceDays < 0 ? statusBadge("expired") : '<i data-lucide="shield-check"></i>'}</div><div class="list-item"><span class="list-copy"><strong>FUEC</strong><small>${escapeHtml(documentLine(vehicle.fuecExpirationDate, fuecDays))}</small></span>${fuecDays !== null && fuecDays < 0 ? statusBadge("expired") : '<i data-lucide="file-check-2"></i>'}</div></div><div class="route-card-actions"><button class="button button-outline button-sm" data-edit="vehicle" data-id="${vehicle.id}"><i data-lucide="pencil"></i>Editar</button><button class="icon-button" data-delete="vehicle" data-id="${vehicle.id}" aria-label="Eliminar"><i data-lucide="trash-2"></i></button></div></div></article>`;
     }).join("")}</div>`
     : emptyState("bus-front", "Registra la flota", "Añade los buses y vehículos que operarán las rutas.", `<button class="button button-primary" data-open="vehicle">Nuevo vehículo</button>`);
   return `<div class="page-stack"><div class="hero-row"><div class="hero-copy"><h1>Flota vehicular</h1><p>Controla asignaciones, capacidad y fechas de documentación de cada vehículo.</p></div><div class="hero-actions"><button class="button button-primary" data-open="vehicle"><i data-lucide="plus"></i>Nuevo vehículo</button></div></div>${body}</div>`;
 }
 
 function adminPayments() {
+  const requests = [...state.data.paymentRequests].sort((a, b) => valueMs(b.createdAt) - valueMs(a.createdAt));
+  const pendingCount = requests.filter((request) => request.status === "pending").length;
+  const requestsBody = requests.length
+    ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Representante / estudiante</th><th>Datos del pago</th><th>Comprobante</th><th>Estado</th><th></th></tr></thead><tbody>${requests.map((request) => `<tr><td><div class="table-main"><span class="row-icon">${initials(request.studentName || request.guardianName)}</span><span><strong>${escapeHtml(request.studentName || "Estudiante")}</strong><small>${escapeHtml(request.guardianName || request.payerName || "Representante")} · ${escapeHtml(request.payerDocument || "Sin documento")}</small></span></div></td><td><strong>${formatMoney(request.amount)}</strong><br><small>${formatDate(request.paidAtDate)} · ${escapeHtml(paymentMethodLabel(request.method))}${request.period ? ` · ${escapeHtml(formatPeriod(request.period))}` : ""}</small></td><td><button class="button button-outline button-sm" data-proof="${request.id}"><i data-lucide="image"></i>Ver foto</button></td><td>${statusBadge(request.status || "pending")}${request.reviewNote ? `<br><small>${escapeHtml(request.reviewNote)}</small>` : ""}</td><td><div class="row-actions">${request.status === "pending" ? `<button class="button button-success button-sm" data-review-payment="approve" data-id="${request.id}"><i data-lucide="check"></i>Aprobar</button><button class="button button-danger button-sm" data-review-payment="reject" data-id="${request.id}"><i data-lucide="x"></i>Rechazar</button>` : ""}</div></td></tr>`).join("")}</tbody></table></div>`
+    : emptyState("image", "Sin comprobantes recibidos", "Las solicitudes enviadas por los representantes aparecerán aquí.");
   const payments = [...state.data.payments].sort((a, b) => String(b.validUntilDate).localeCompare(String(a.validUntilDate)));
   const body = payments.length
     ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Representante / estudiante</th><th>Pago</th><th>Vigencia</th><th>Estado</th><th></th></tr></thead><tbody>${payments.map((payment) => {
@@ -725,7 +771,7 @@ function adminPayments() {
       return `<tr><td><div class="table-main"><span class="row-icon">${initials(student?.fullName || parent?.fullName)}</span><span><strong>${escapeHtml(student?.fullName || "Estudiante")}</strong><small>${escapeHtml(parent?.fullName || "Representante")}</small></span></div></td><td><strong>${formatMoney(payment.amount)}</strong><br><small>${formatDate(payment.paidAtDate)}</small></td><td>${formatDate(payment.validUntilDate)}${left !== null ? `<br><small>${left < 0 ? `${Math.abs(left)} días vencida` : `${left} días restantes`}</small>` : ""}</td><td>${statusBadge(status)}</td><td><div class="row-actions"><button class="icon-button" data-edit="payment" data-id="${payment.id}" aria-label="Editar"><i data-lucide="pencil"></i></button><button class="icon-button" data-delete="payment" data-id="${payment.id}" aria-label="Eliminar"><i data-lucide="trash-2"></i></button></div></td></tr>`;
     }).join("")}</tbody></table></div>`
     : emptyState("credit-card", "Sin pagos registrados", "Registra una mensualidad para comenzar el control de vigencias.");
-  return `<div class="page-stack"><div class="hero-row"><div class="hero-copy"><h1>Mensualidades</h1><p>Registra pagos y conoce automáticamente los días restantes de cada servicio.</p></div><div class="hero-actions"><button class="button button-primary" data-open="payment"><i data-lucide="plus"></i>Registrar pago</button></div></div>${panel("Historial de pagos", `${payments.length} transacciones`, body, "", true)}</div>`;
+  return `<div class="page-stack"><div class="hero-row"><div class="hero-copy"><h1>Mensualidades</h1><p>Verifica comprobantes enviados por las familias y controla la vigencia de cada servicio.</p></div><div class="hero-actions"><button class="button button-primary" data-open="payment"><i data-lucide="plus"></i>Registrar pago manual</button></div></div>${panel("Comprobantes por verificar", `${pendingCount} pendientes · ${requests.length} solicitudes`, requestsBody, "", true)}${panel("Pagos confirmados", `${payments.length} transacciones`, body, "", true)}</div>`;
 }
 
 function adminTrips() {
@@ -943,6 +989,10 @@ function parentChildren() {
 }
 
 function parentPayments() {
+  const requests = [...state.data.paymentRequests].sort((a, b) => valueMs(b.createdAt) - valueMs(a.createdAt));
+  const requestsBody = requests.length
+    ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Estudiante</th><th>Valor</th><th>Fecha / período</th><th>Comprobante</th><th>Estado</th></tr></thead><tbody>${requests.map((request) => `<tr><td><div class="table-main"><span class="row-icon">${initials(request.studentName)}</span><span><strong>${escapeHtml(request.studentName || "Estudiante")}</strong><small>${escapeHtml(request.payerName || state.profile.fullName)}</small></span></div></td><td>${formatMoney(request.amount)}<br><small>${escapeHtml(paymentMethodLabel(request.method))}</small></td><td>${formatDate(request.paidAtDate)}<br><small>${escapeHtml(formatPeriod(request.period))}</small></td><td><button class="button button-outline button-sm" data-proof="${request.id}"><i data-lucide="image"></i>Ver foto</button></td><td>${statusBadge(request.status || "pending")}${request.reviewNote ? `<br><small>${escapeHtml(request.reviewNote)}</small>` : ""}</td></tr>`).join("")}</tbody></table></div>`
+    : emptyState("upload-cloud", "Aún no has enviado comprobantes", "Reporta tu pago y quedará pendiente hasta que un administrador lo verifique.", state.data.students.length ? '<button class="button button-primary" data-open="paymentRequest">Reportar pago</button>' : "");
   const payments = [...state.data.payments].sort((a, b) => String(b.validUntilDate).localeCompare(String(a.validUntilDate)));
   const body = payments.length
     ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Estudiante</th><th>Valor</th><th>Fecha de pago</th><th>Vigencia</th><th>Estado</th></tr></thead><tbody>${payments.map((payment) => {
@@ -951,7 +1001,7 @@ function parentPayments() {
       return `<tr><td><div class="table-main"><span class="row-icon">${initials(student?.fullName)}</span><span><strong>${escapeHtml(student?.fullName || "Estudiante")}</strong><small>${escapeHtml(payment.reference || "Mensualidad")}</small></span></div></td><td>${formatMoney(payment.amount)}</td><td>${formatDate(payment.paidAtDate)}</td><td>${formatDate(payment.validUntilDate)}<br><small>${days !== null && days >= 0 ? `${days} días restantes` : "Vencida"}</small></td><td>${statusBadge(days !== null && days < 0 ? "expired" : payment.status || "paid")}</td></tr>`;
     }).join("")}</tbody></table></div>`
     : emptyState("wallet-cards", "No hay pagos registrados", "Tus mensualidades aparecerán aquí cuando la empresa confirme el pago.");
-  return `<div class="page-stack"><div class="hero-row"><div class="hero-copy"><h1>Mensualidades</h1><p>Consulta pagos realizados, referencias y fechas de vigencia.</p></div></div>${panel("Historial de pagos", `${payments.length} registros`, body, "", true)}</div>`;
+  return `<div class="page-stack"><div class="hero-row"><div class="hero-copy"><h1>Mensualidades</h1><p>Envía el comprobante de pago y consulta su verificación y vigencia.</p></div><div class="hero-actions"><button class="button button-primary" data-open="paymentRequest" ${state.data.students.length ? "" : "disabled"}><i data-lucide="upload-cloud"></i>Reportar pago</button></div></div>${panel("Comprobantes enviados", `${requests.length} solicitudes`, requestsBody, "", true)}${panel("Pagos confirmados", `${payments.length} registros`, body, "", true)}</div>`;
 }
 
 function parentHistory() {
@@ -986,6 +1036,10 @@ function textareaField(name, label, value = "", full = true) {
   return `<label class="field ${full ? "field-full" : ""}"><span>${escapeHtml(label)}</span><textarea name="${name}">${escapeHtml(value || "")}</textarea></label>`;
 }
 
+function fileField(name, label, accept = "image/jpeg,image/png,image/webp", extra = "", full = true) {
+  return `<label class="field ${full ? "field-full" : ""}"><span>${escapeHtml(label)}</span><input name="${name}" type="file" accept="${escapeHtml(accept)}" ${extra}></label>`;
+}
+
 function findRecord(kind, id) {
   const key = { user: "users", route: "routes", student: "students", vehicle: "vehicles", payment: "payments", trip: "trips" }[kind];
   return key ? getById(state.data[key], id) : null;
@@ -993,11 +1047,16 @@ function findRecord(kind, id) {
 
 function openModal(kind, id = "") {
   const record = id ? findRecord(kind, id) : null;
+  if (kind === "user" && record?.role === "admin" && !isGeneralAdmin()) {
+    toast("Acceso protegido", "Solo el administrador general puede editar cuentas administrativas.", "error");
+    return;
+  }
+  if (kind === "paymentRequest" && state.profile?.role !== "parent") return;
   state.modal = { kind, id: record?.id || "" };
   els.modalError.classList.add("hidden");
   els.modalError.textContent = "";
   els.saveDialog.disabled = false;
-  els.saveDialog.textContent = record ? "Guardar cambios" : "Crear registro";
+  els.saveDialog.textContent = kind === "paymentRequest" ? "Enviar comprobante" : record ? "Guardar cambios" : "Crear registro";
 
   const definitions = {
     user: [record ? "Editar persona" : "Registrar persona", record ? "Actualiza los datos y el estado de acceso." : "Se creará una cuenta para ingresar a la plataforma."],
@@ -1005,19 +1064,21 @@ function openModal(kind, id = "") {
     student: [record ? "Editar estudiante" : "Inscribir estudiante", "Vincula al niño con su representante y ruta."],
     vehicle: [record ? "Editar vehículo" : "Nuevo vehículo", "Registra la información operativa y documental."],
     payment: [record ? "Editar mensualidad" : "Registrar mensualidad", "La vigencia se mostrará automáticamente a la familia."],
+    paymentRequest: ["Reportar pago de mensualidad", "Completa los datos y adjunta una foto clara del comprobante."],
     trip: [record ? "Editar viaje privado" : "Programar viaje privado", "Organiza el servicio, la asignación y la cotización."],
   };
   [els.modalTitle.textContent, els.modalDescription.textContent] = definitions[kind];
 
   if (kind === "user") {
     const adminRecord = record?.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase();
+    const roleOptions = `<option value="driver">Conductor</option><option value="parent">Representante</option>${record && isGeneralAdmin() ? '<option value="admin">Administrador</option>' : ""}`;
     els.modalFields.innerHTML = `
       ${field("fullName", "Nombre completo", record?.fullName, "text", "required autocomplete=\"name\"")}
       ${field("phone", "Teléfono", record?.phone, "tel", "autocomplete=\"tel\"")}
       ${field("email", "Correo electrónico", record?.email, "email", `required autocomplete="email" ${record ? "disabled" : ""}`, true)}
       ${record ? "" : field("password", "Contraseña temporal", "", "password", "required minlength=\"6\" autocomplete=\"new-password\"")}
-      ${adminRecord ? '<input type="hidden" name="role" value="admin" /><input type="hidden" name="status" value="active" /><p class="field-hint field-full">Único administrador general. Su perfil y acceso están protegidos.</p>' : `${selectField("role", "Perfil", '<option value="driver">Conductor</option><option value="parent">Representante</option>', record?.role)}${selectField("status", "Estado", '<option value="pending">Pendiente de aprobación</option><option value="active">Activo (aprobado)</option><option value="inactive">Inactivo</option>', record?.status || "pending")}`}
-      <p class="field-hint field-full">${record ? "Seleccionar Activo aprueba el acceso de esta cuenta." : "Al crear la cuenta, entrega el correo y la contraseña temporal a la persona por un canal seguro. Seleccionar Activo aprueba su acceso."}</p>`;
+      ${adminRecord ? '<input type="hidden" name="role" value="admin" /><input type="hidden" name="status" value="active" /><p class="field-hint field-full">Administrador general. Su perfil y acceso están protegidos.</p>' : `${selectField("role", "Perfil", roleOptions, record?.role)}${selectField("status", "Estado", '<option value="pending">Pendiente de aprobación</option><option value="active">Activo (aprobado)</option><option value="inactive">Inactivo</option>', record?.status || "pending")}`}
+      <p class="field-hint field-full">${record && isGeneralAdmin() ? "Puedes asignar el rango Administrador. Solo el administrador general puede concederlo o retirarlo." : record ? "Seleccionar Activo aprueba el acceso de esta cuenta." : "La nueva cuenta puede crearse como Conductor o Representante; el administrador general puede ascenderla después."}</p>`;
   }
 
   if (kind === "route") {
@@ -1062,7 +1123,8 @@ function openModal(kind, id = "") {
       ${selectField("driverUid", "Conductor habitual", options(drivers, record?.driverUid, (item) => item.fullName), record?.driverUid, false, false)}
       ${selectField("status", "Estado", `<option value="available" ${record?.status === "available" || !record ? "selected" : ""}>Disponible</option><option value="assigned" ${record?.status === "assigned" ? "selected" : ""}>Asignado</option><option value="maintenance" ${record?.status === "maintenance" ? "selected" : ""}>Mantenimiento</option><option value="inactive" ${record?.status === "inactive" ? "selected" : ""}>Inactivo</option>`, record?.status || "available")}
       ${field("technicalReviewDate", "Vence revisión técnica", record?.technicalReviewDate, "date", "required")}
-      ${field("insuranceDate", "Vence seguro", record?.insuranceDate, "date", "required")}`;
+      ${field("insuranceDate", "Vence seguro", record?.insuranceDate, "date", "required")}
+      ${field("fuecExpirationDate", "Vence FUEC", record?.fuecExpirationDate, "date", "required", true)}`;
   }
 
   if (kind === "payment") {
@@ -1076,6 +1138,28 @@ function openModal(kind, id = "") {
       ${selectField("method", "Método", `<option value="transfer" ${record?.method === "transfer" ? "selected" : ""}>Transferencia</option><option value="cash" ${record?.method === "cash" ? "selected" : ""}>Efectivo</option><option value="card" ${record?.method === "card" ? "selected" : ""}>Tarjeta</option><option value="other" ${record?.method === "other" ? "selected" : ""}>Otro</option>`, record?.method || "transfer")}
       ${field("reference", "Referencia / comprobante", record?.reference, "text")}
       ${selectField("status", "Estado", `<option value="paid" ${record?.status !== "pending" ? "selected" : ""}>Pagado</option><option value="pending" ${record?.status === "pending" ? "selected" : ""}>Pendiente</option>`, record?.status || "paid")}`;
+  }
+
+  if (kind === "paymentRequest") {
+    if (!state.data.students.length) {
+      toast("Sin estudiantes vinculados", "Un administrador debe vincular primero un estudiante a tu cuenta.", "error");
+      state.modal = null;
+      return;
+    }
+    const defaultDate = new Date().toISOString().slice(0, 10);
+    const defaultPeriod = defaultDate.slice(0, 7);
+    els.modalFields.innerHTML = `
+      ${selectField("studentId", "Estudiante", options(state.data.students, state.selectedStudentId, (item) => item.fullName), state.selectedStudentId, true)}
+      ${field("payerName", "Nombre de quien realizó el pago", state.profile.fullName, "text", "required maxlength=\"120\"")}
+      ${field("payerDocument", "Documento de identidad", "", "text", "required maxlength=\"30\"")}
+      ${field("payerPhone", "Teléfono de contacto", state.profile.phone || "", "tel", "required maxlength=\"32\"")}
+      ${field("amount", "Valor pagado", "", "number", "required min=\"1\" step=\"100\"")}
+      ${field("paidAtDate", "Fecha del pago", defaultDate, "date", "required")}
+      ${field("period", "Mensualidad correspondiente", defaultPeriod, "month", "required")}
+      ${selectField("method", "Método", '<option value="transfer">Transferencia</option><option value="cash">Efectivo</option><option value="card">Tarjeta</option><option value="other">Otro</option>', "transfer")}
+      ${field("reference", "Número de referencia", "", "text", "maxlength=\"80\"")}
+      ${fileField("proof", "Foto del comprobante", "image/jpeg,image/png,image/webp", "required")}
+      <p class="field-hint field-full">Formatos admitidos: JPG, PNG o WebP, máximo 8 MB. La imagen se comprime automáticamente y se guarda en Firestore para no depender de Firebase Storage.</p>`;
   }
 
   if (kind === "trip") {
@@ -1104,9 +1188,115 @@ function formObject(form) {
   return Object.fromEntries(Object.entries(data).map(([key, value]) => [key, typeof value === "string" && !["password", "confirmPassword"].includes(key) ? value.trim() : value]));
 }
 
+async function decodeImage(file) {
+  if ("createImageBitmap" in window) return createImageBitmap(file);
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("No se pudo leer la imagen del comprobante."));
+    };
+    image.src = url;
+  });
+}
+
+async function prepareProofImage(file) {
+  const allowed = new Set(["image/jpeg", "image/png", "image/webp"]);
+  if (!(file instanceof File) || !file.size) throw new Error("Adjunta una foto del comprobante.");
+  if (!allowed.has(file.type)) throw new Error("La foto debe estar en formato JPG, PNG o WebP.");
+  if (file.size > 8 * 1024 * 1024) throw new Error("La foto supera el límite de 8 MB.");
+
+  const image = await decodeImage(file);
+  const width = image.width;
+  const height = image.height;
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d", { alpha: false });
+  if (!context) throw new Error("El navegador no pudo preparar la imagen.");
+  let selectedBlob = null;
+  const maxBytes = 450 * 1024;
+  for (const maxDimension of [1400, 1200, 1000, 800]) {
+    const scale = Math.min(1, maxDimension / Math.max(width, height));
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    context.fillStyle = "#fff";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    for (const quality of [0.82, 0.7, 0.58, 0.46]) {
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", quality));
+      if (!blob) continue;
+      selectedBlob = blob;
+      if (blob.size <= maxBytes) break;
+    }
+    if (selectedBlob?.size <= maxBytes) break;
+  }
+  image.close?.();
+  if (!selectedBlob || selectedBlob.size > maxBytes) {
+    throw new Error("La foto tiene demasiado detalle para guardarse. Recórtala al comprobante e intenta nuevamente.");
+  }
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("No se pudo preparar la foto del comprobante."));
+    reader.readAsDataURL(selectedBlob);
+  });
+  if (typeof dataUrl !== "string" || dataUrl.length > 650000) {
+    throw new Error("La foto optimizada aún supera el tamaño permitido.");
+  }
+  return { dataUrl, size: selectedBlob.size, type: "image/jpeg", name: "comprobante.jpg" };
+}
+
+async function submitPaymentRequest(data) {
+  const student = getById(state.data.students, data.studentId);
+  if (!student || student.guardianUid !== state.user.uid) throw new Error("Selecciona un estudiante vinculado a tu cuenta.");
+  if (!data.payerName || !data.payerDocument || !data.payerPhone) throw new Error("Completa los datos de quien realizó el pago.");
+  const amount = Number(data.amount);
+  if (!Number.isFinite(amount) || amount <= 0) throw new Error("Escribe un valor pagado válido.");
+  const today = new Date().toISOString().slice(0, 10);
+  if (!data.paidAtDate || data.paidAtDate > today) throw new Error("La fecha del pago no puede estar en el futuro.");
+  if (!/^\d{4}-\d{2}$/.test(data.period || "")) throw new Error("Selecciona la mensualidad correspondiente.");
+
+  const proof = await prepareProofImage(data.proof);
+  const requestReference = doc(collection(db, "paymentRequests"));
+  const batch = writeBatch(db);
+  batch.set(requestReference, {
+    guardianUid: state.user.uid,
+    guardianName: state.profile.fullName || "",
+    guardianEmail: state.user.email || "",
+    studentId: student.id,
+    studentName: student.fullName,
+    payerName: data.payerName,
+    payerDocument: data.payerDocument,
+    payerPhone: data.payerPhone,
+    amount,
+    paidAtDate: data.paidAtDate,
+    paidAtMs: new Date(`${data.paidAtDate}T12:00:00`).getTime(),
+    period: data.period,
+    method: data.method,
+    reference: data.reference || "",
+    status: "pending",
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+  batch.set(doc(db, "paymentProofs", requestReference.id), {
+    requestId: requestReference.id,
+    guardianUid: state.user.uid,
+    proofDataUrl: proof.dataUrl,
+    proofName: proof.name,
+    proofContentType: proof.type,
+    proofSize: proof.size,
+    createdAt: serverTimestamp(),
+  });
+  await batch.commit();
+}
+
 async function createPlatformUser(data) {
-  if (state.profile?.role !== "admin" || state.user?.email?.toLowerCase() !== ADMIN_EMAIL.toLowerCase() || !state.user.emailVerified) {
-    throw new Error("Solo el administrador general puede registrar personas desde el panel.");
+  if (state.profile?.role !== "admin") {
+    throw new Error("Solo un administrador puede registrar personas desde el panel.");
   }
   if (!["driver", "parent"].includes(data.role) || !["pending", "active", "inactive"].includes(data.status)) {
     throw new Error("Selecciona un perfil y estado válidos.");
@@ -1184,12 +1374,19 @@ async function saveModal(event) {
     if (kind === "user") {
       if (id) {
         const previous = findRecord("user", id);
-        const adminRecord = previous?.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase();
-        if (adminRecord && (id !== state.user.uid || data.role !== "admin" || data.status !== "active")) {
-          throw new Error("No puedes quitar tu propio acceso de administrador desde esta sesión.");
+        const generalAdminRecord = previous?.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase();
+        if (!previous) throw new Error("La persona ya no está disponible.");
+        if (generalAdminRecord && (id !== state.user.uid || data.role !== "admin" || data.status !== "active")) {
+          throw new Error("No puedes modificar el rango ni el estado del administrador general.");
         }
-        if (!adminRecord && (!["driver", "parent"].includes(data.role) || !["pending", "active", "inactive"].includes(data.status))) {
-          throw new Error("Solo se admiten conductores y representantes con un estado válido.");
+        if ((previous.role === "admin" || data.role === "admin") && !isGeneralAdmin()) {
+          throw new Error("Solo el administrador general puede conceder o retirar el rango Administrador.");
+        }
+        if (!["driver", "parent", "admin"].includes(data.role) || !["pending", "active", "inactive"].includes(data.status)) {
+          throw new Error("Selecciona un perfil y estado válidos.");
+        }
+        if (data.role === "admin" && data.status === "pending") {
+          throw new Error("Un administrador debe quedar Activo o Inactivo, no Pendiente.");
         }
         await updateDoc(doc(db, "users", id), {
           fullName: data.fullName,
@@ -1197,7 +1394,7 @@ async function saveModal(event) {
           role: data.role,
           status: data.status,
           updatedAt: serverTimestamp(),
-          ...(!adminRecord && data.status === "active" && previous?.status !== "active" ? { approvedAt: serverTimestamp(), approvedBy: state.user.uid } : {}),
+          ...(!generalAdminRecord && data.status === "active" && (previous.status !== "active" || previous.role !== data.role) ? { approvedAt: serverTimestamp(), approvedBy: state.user.uid } : {}),
         });
       } else {
         await createPlatformUser(data);
@@ -1239,6 +1436,7 @@ async function saveModal(event) {
         status: data.status,
         technicalReviewDate: data.technicalReviewDate,
         insuranceDate: data.insuranceDate,
+        fuecExpirationDate: data.fuecExpirationDate,
         updatedAt: serverTimestamp(),
         ...(!id ? { createdAt: serverTimestamp() } : {}),
       }, { merge: true });
@@ -1308,6 +1506,10 @@ async function saveModal(event) {
       }, { merge: true });
     }
 
+    if (kind === "paymentRequest") {
+      await submitPaymentRequest(data);
+    }
+
     if (kind === "trip") {
       const reference = id ? doc(db, "privateTrips", id) : doc(collection(db, "privateTrips"));
       await setDoc(reference, {
@@ -1330,14 +1532,112 @@ async function saveModal(event) {
 
     els.dialog.close();
     state.modal = null;
-    toast(id ? "Cambios guardados" : "Registro creado", "La información ya está disponible para los perfiles autorizados.");
+    if (kind === "paymentRequest") toast("Comprobante enviado", "Quedó pendiente de verificación por un administrador.");
+    else toast(id ? "Cambios guardados" : "Registro creado", "La información ya está disponible para los perfiles autorizados.");
   } catch (error) {
     console.error(error);
     els.modalError.textContent = friendlyError(error);
     els.modalError.classList.remove("hidden");
   } finally {
     els.saveDialog.disabled = false;
-    els.saveDialog.textContent = id ? "Guardar cambios" : "Crear registro";
+    els.saveDialog.textContent = kind === "paymentRequest" ? "Enviar comprobante" : id ? "Guardar cambios" : "Crear registro";
+  }
+}
+
+function datePlusDays(dateText, days) {
+  const date = new Date(`${dateText}T12:00:00`);
+  date.setDate(date.getDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+async function openPaymentProof(id) {
+  const request = getById(state.data.paymentRequests, id);
+  if (!request) return;
+  const preview = window.open("about:blank", "_blank");
+  if (!preview) {
+    toast("Ventana bloqueada", "Permite ventanas emergentes para ver el comprobante.", "error");
+    return;
+  }
+  try {
+    const snapshot = await getDoc(doc(db, "paymentProofs", id));
+    const proof = snapshot.data();
+    if (!snapshot.exists() || !proof?.proofDataUrl?.startsWith("data:image/")) throw new Error("No se encontró la imagen guardada.");
+    preview.opener = null;
+    preview.document.title = "Comprobante de pago";
+    preview.document.body.style.cssText = "margin:0;min-height:100vh;display:grid;place-items:center;background:#111827;padding:20px;box-sizing:border-box";
+    const image = preview.document.createElement("img");
+    image.src = proof.proofDataUrl;
+    image.alt = "Comprobante de pago";
+    image.style.cssText = "max-width:100%;max-height:calc(100vh - 40px);object-fit:contain;border-radius:12px;background:white";
+    preview.document.body.append(image);
+  } catch (error) {
+    preview.close();
+    toast("No se pudo abrir la foto", friendlyError(error), "error");
+  }
+}
+
+async function reviewPaymentRequest(id, action) {
+  if (state.profile?.role !== "admin" || !["approve", "reject"].includes(action)) return;
+  const request = getById(state.data.paymentRequests, id);
+  if (!request || request.status !== "pending") {
+    toast("Solicitud actualizada", "Este comprobante ya fue revisado.", "error");
+    return;
+  }
+  let reviewNote = "";
+  if (action === "approve") {
+    if (!window.confirm(`¿Confirmas el pago de ${formatMoney(request.amount)} para ${request.studentName}?`)) return;
+  } else {
+    const reason = window.prompt("Motivo del rechazo (se mostrará al representante):", "Comprobante no válido");
+    if (reason === null) return;
+    reviewNote = reason.trim();
+    if (reviewNote.length < 3) {
+      toast("Escribe un motivo", "El representante necesita saber por qué debe corregir el comprobante.", "error");
+      return;
+    }
+  }
+
+  try {
+    await runTransaction(db, async (transaction) => {
+      const requestReference = doc(db, "paymentRequests", id);
+      const snapshot = await transaction.get(requestReference);
+      if (!snapshot.exists() || snapshot.data().status !== "pending") throw new Error("Este comprobante ya fue revisado.");
+      const current = snapshot.data();
+      const approved = action === "approve";
+      const studentSnapshot = approved ? await transaction.get(doc(db, "students", current.studentId)) : null;
+      if (approved && (!studentSnapshot?.exists() || studentSnapshot.data().guardianUid !== current.guardianUid)) {
+        throw new Error("El estudiante ya no está vinculado con este representante.");
+      }
+      transaction.update(requestReference, {
+        status: approved ? "approved" : "rejected",
+        reviewNote,
+        reviewedAt: serverTimestamp(),
+        reviewedBy: state.user.uid,
+        updatedAt: serverTimestamp(),
+      });
+      if (approved) {
+        const validUntilDate = datePlusDays(current.paidAtDate, 30);
+        transaction.set(doc(db, "payments", id), {
+          studentId: current.studentId,
+          studentName: studentSnapshot.data().fullName,
+          guardianUid: current.guardianUid,
+          amount: Number(current.amount),
+          paidAtDate: current.paidAtDate,
+          paidAtMs: new Date(`${current.paidAtDate}T12:00:00`).getTime(),
+          validUntilDate,
+          method: current.method,
+          reference: current.reference || current.period || "",
+          period: current.period || "",
+          status: "paid",
+          sourceRequestId: id,
+          createdAt: serverTimestamp(),
+          createdBy: state.user.uid,
+          updatedAt: serverTimestamp(),
+        });
+      }
+    });
+    toast(action === "approve" ? "Pago aprobado" : "Comprobante rechazado", action === "approve" ? "La mensualidad ya aparece como pagada y vigente por 30 días." : "El representante verá el motivo y podrá enviar un nuevo comprobante.");
+  } catch (error) {
+    toast("No se pudo revisar", friendlyError(error), "error");
   }
 }
 
@@ -1714,6 +2014,15 @@ els.main.addEventListener("click", async (event) => {
   if (target.dataset.approveUser) {
     target.disabled = true;
     try { await approveUser(target.dataset.approveUser); } finally { target.disabled = false; }
+    return;
+  }
+  if (target.dataset.proof) {
+    await openPaymentProof(target.dataset.proof);
+    return;
+  }
+  if (target.dataset.reviewPayment) {
+    target.disabled = true;
+    try { await reviewPaymentRequest(target.dataset.id, target.dataset.reviewPayment); } finally { target.disabled = false; }
     return;
   }
   if (target.dataset.selectChild) state.selectedStudentId = target.dataset.selectChild;
